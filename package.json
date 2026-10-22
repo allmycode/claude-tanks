@@ -1,0 +1,13 @@
+{
+  "name": "claude-tanks",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Танки: вид сверху, одиночная, совместная и сетевая игра",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}
