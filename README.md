@@ -31,3 +31,4 @@
 - `server.js` — HTTP-сервер для файлов игры и WebSocket-комнаты на двух игроков
 - [docs/PLAN.md](docs/PLAN.md) — задание и как оно менялось
 - [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) — детали реализации и сетевой протокол
+- [docs/TOKENS.md](docs/TOKENS.md) — сколько токенов ушло на создание проекта
