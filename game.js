@@ -3,7 +3,8 @@
 (function (root) {
 'use strict';
 
-const CELL = 12, N = 52, FS = CELL * N, TS = 48;        // клетка, клеток по стороне, размер поля, размер танка
+const CELL = 6, N = 104, FS = CELL * N, TS = 48;        // клетка, клеток по стороне, размер поля, размер танка
+const LC = 12, LN = 52;                                  // клетка и размер сетки разметки уровня
 const EMPTY = 0, BRICK = 1, STEEL = 2, WATER = 3, BUSH = 4, BASE = 6;
 const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];          // 0 вверх, 1 вправо, 2 вниз, 3 влево
 const BASE_X = 288, BASE_Y = 576;
@@ -57,13 +58,15 @@ function createGame(opts = {}) {
     if (track) G.changes.push(i, v);
   }
 
+  // Карта строится на сетке разметки 52×52 (клетки по 12 px), а потом каждая клетка
+  // разметки становится 2×2 клетками игры: так выстрел снимает четверть стенки, а не половину.
   function genLevel(lv) {
-    grid.fill(EMPTY);
+    const L = new Uint8Array(LN * LN), li = (c, r) => r * LN + c;
     const R = mulberry32(lv * 7919 + 13);
     const ri = (a, b) => a + Math.floor(R() * (b - a + 1));
     const put = (c, r, w, h, t) => {
       for (let y = r; y < r + h; y++) for (let x = c; x < c + w; x++) {
-        if (x >= 0 && y >= 0 && x < N && y < N) { grid[gi(x, y)] = t; grid[gi(N - 1 - x, y)] = t; }
+        if (x >= 0 && y >= 0 && x < LN && y < LN) { L[li(x, y)] = t; L[li(LN - 1 - x, y)] = t; }
       }
     };
     const steelP = Math.min(0.1 + lv * 0.015, 0.22), waterP = lv > 1 ? 0.08 : 0.04, bushP = 0.12;
@@ -81,33 +84,37 @@ function createGame(opts = {}) {
     // Небольшие бетонные блоки
     for (let i = 0; i < 4 + Math.min(lv, 6); i++) put(ri(1, 11) * 2, ri(3, 21) * 2, ri(1, 2) * 2, 2, STEEL);
 
-    const clear = (c, r, w, h) => { for (let y = r; y < r + h; y++) for (let x = c; x < c + w; x++) grid[gi(x, y)] = EMPTY; };
+    const clear = (c, r, w, h) => { for (let y = r; y < r + h; y++) for (let x = c; x < c + w; x++) L[li(x, y)] = EMPTY; };
     const soften = (c, r, w, h) => {
       for (let y = r; y < r + h; y++) for (let x = c; x < c + w; x++) {
-        const v = grid[gi(x, y)];
-        if (v === STEEL || v === WATER) grid[gi(x, y)] = BRICK;
+        const v = L[li(x, y)];
+        if (v === STEEL || v === WATER) L[li(x, y)] = BRICK;
       }
     };
     // Точки появления врагов и проходы от них
-    for (const sx of SPAWNS) { clear(sx / CELL, 0, 4, 4); soften(sx / CELL, 4, 4, 14); }
+    for (const sx of SPAWNS) { clear(sx / LC, 0, 4, 4); soften(sx / LC, 4, 4, 14); }
     // Зона штаба и игроков
     clear(20, 42, 12, 10);
     clear(16, 48, 4, 4); clear(32, 48, 4, 4);
     soften(16, 0, 4, 48); soften(32, 0, 4, 48);
-    for (let y = 48; y < 52; y++) for (let x = 24; x < 28; x++) grid[gi(x, y)] = BASE;
-    setRing(BRICK);
+    for (let y = 48; y < 52; y++) for (let x = 24; x < 28; x++) L[li(x, y)] = BASE;
     // Бетонное прикрытие штаба: нет прямого прострела сверху и с боков
     put(22, ri(13, 19) * 2, 8, 2, STEEL);
     if (R() < 0.5) put(22, ri(4, 9) * 2, 8, 2, STEEL);
     put(ri(2, 6) * 2, 46, 2, 6, STEEL);
+
+    const k = LC / CELL;
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) grid[gi(c, r)] = L[li(Math.floor(c / k), Math.floor(r / k))];
+    setRing(BRICK);
     G.gridVer++;
     G.fullGrid = true;
     G.changes.length = 0;
   }
   function ringCells() {
     const out = [];
-    for (let y = 46; y < 52; y++) for (let x = 22; x < 30; x++) {
-      if (x >= 24 && x < 28 && y >= 48) continue;
+    // кольцо в полтайла вокруг штаба (штаб — клетки 48–55 × 96–103)
+    for (let y = 92; y < 104; y++) for (let x = 44; x < 60; x++) {
+      if (x >= 48 && x < 56 && y >= 96) continue;
       out.push([x, y]);
     }
     return out;
@@ -364,22 +371,23 @@ function createGame(opts = {}) {
   }
   function hitCell(c, r, power) {
     const v = cellAt(c, r);
-    if (v === BRICK) { setCell(c, r, EMPTY); debris(c * CELL + 6, r * CELL + 6, '#b5562a'); return 1; }
+    if (v === BRICK) { setCell(c, r, EMPTY); if (c % 2) debris(c * CELL, r * CELL + 3, '#b5562a'); return 1; }
     if (v === STEEL) {
-      if (power >= 2) { setCell(c, r, EMPTY); debris(c * CELL + 6, r * CELL + 6, '#cfcfcf'); return 1; }
+      if (power >= 2) { setCell(c, r, EMPTY); if (c % 2) debris(c * CELL, r * CELL + 3, '#cfcfcf'); return 1; }
       return 2;
     }
     return 0;
   }
   function impact(b) {
-    // Пуля сносит полосу шириной с танк (4 клетки) в первом ряду, где есть что ломать
+    // Пуля сносит полосу шириной с танк (8 клеток) и глубиной в одну клетку (6 px)
+    // в первом ряду, где есть что ломать: стенка в полтайла уходит за 4 выстрела
     const vert = b.dir % 2 === 0;
     const lead = vert ? Math.floor((b.dir === 0 ? b.y - 3 : b.y + 2.99) / CELL)
                       : Math.floor((b.dir === 3 ? b.x - 3 : b.x + 2.99) / CELL);
-    const c0 = Math.round((vert ? b.x : b.y) / CELL) - 2;
+    const c0 = Math.round((vert ? b.x : b.y) / CELL) - 4;
     let broke = false, steel = false;
     for (const line of [lead, lead - (vert ? DY[b.dir] : DX[b.dir])]) {
-      for (let k = c0; k < c0 + 4; k++) {
+      for (let k = c0; k < c0 + 8; k++) {
         const res = vert ? hitCell(k, line, b.power) : hitCell(line, k, b.power);
         if (res === 1) broke = true; else if (res === 2) steel = true;
       }

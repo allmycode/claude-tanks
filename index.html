@@ -33,7 +33,7 @@
   <div class="box">
     <h2>СЕТЕВАЯ ИГРА</h2>
     <label for="addr">АДРЕС СЕРВЕРА</label>
-    <input id="addr" spellcheck="false" autocomplete="off" placeholder="localhost:8080">
+    <input id="addr" spellcheck="false" autocomplete="off" placeholder="localhost:8081">
     <div class="hint">Сервер запускается командой npm start в папке игры. Оба игрока подключаются к одному адресу.</div>
     <div class="btns"><button id="go">ПОДКЛЮЧИТЬСЯ</button><button id="back" class="alt">НАЗАД</button></div>
   </div>
@@ -236,11 +236,75 @@ function mapFor(code) {
   if (code in MAP2) return [splitKeys() ? 1 : 0, MAP2[code]];
   return null;
 }
-function inputDir(id) { const s = dirStack[id]; return s.length ? s[s.length - 1].d : -1; }
+function inputDir(id) {
+  const p = padFor(id);
+  if (p && p.dir >= 0) return p.dir;
+  const s = dirStack[id];
+  return s.length ? s[s.length - 1].d : -1;
+}
 function fireHeld(id) {
+  const p = padFor(id);
+  if (p && p.fire) return true;
   if (id === 0) return !!(keys.Space || (!splitKeys() && (keys.Enter || keys.KeyJ || keys.NumpadEnter || keys.KeyK)));
   return !!(keys.Enter || keys.NumpadEnter || keys.Numpad0 || keys.ControlRight || keys.ShiftRight);
 }
+
+// ===== Геймпады (Gamepad API, стандартная раскладка) =====
+// Крестовина или левый стик — движение, A/B/X/Y/RB/RT — огонь, Start — пауза, Back/Select — выход.
+let pads = [], padPrev = {};
+function readPads() {
+  const raw = navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(g => g && g.connected) : [];
+  pads = raw.map(gp => {
+    const b = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
+    let dir = b(12) ? 0 : b(15) ? 1 : b(13) ? 2 : b(14) ? 3 : -1;
+    if (dir < 0) {
+      const x = gp.axes[0] || 0, y = gp.axes[1] || 0;
+      if (Math.max(Math.abs(x), Math.abs(y)) > 0.5) dir = Math.abs(x) > Math.abs(y) ? (x > 0 ? 1 : 3) : (y > 0 ? 2 : 0);
+    }
+    return { index: gp.index, dir, a: b(0), b: b(1), start: b(9), back: b(8),
+             fire: b(0) || b(1) || b(2) || b(3) || b(5) || b(7) };
+  });
+}
+// Вдвоём за одним компьютером: два геймпада — по одному на игрока, один — второму игроку.
+// В остальных режимах любой геймпад управляет своим танком.
+function padFor(id) {
+  if (!pads.length) return null;
+  if (splitKeys()) return pads.length >= 2 ? pads[id] : (id === 1 ? pads[0] : null);
+  if (id !== 0) return null;
+  const withDir = pads.find(p => p.dir >= 0);
+  return { dir: withDir ? withDir.dir : -1, fire: pads.some(p => p.fire) };
+}
+// Нажатия кнопок геймпада в меню и на служебных экранах
+function padActions() {
+  for (const p of pads) {
+    const prev = padPrev[p.index] || {};
+    padPrev[p.index] = p;
+    const hit = k => p[k] && !prev[k];
+    const ok = hit('a') || hit('start');
+    const vert = p.dir !== prev.dir && (p.dir === 0 || p.dir === 2) ? p.dir : -1;
+    if (ok || hit('back')) initAudio();
+    if (mode === 'menu') {
+      if (vert === 0) menuSel = (menuSel + 2) % 3;
+      if (vert === 2) menuSel = (menuSel + 1) % 3;
+      if (ok) menuSelect();
+    } else if (mode === 'connect') {
+      if (ok) connect(addrEl.value.trim());
+      else if (hit('b') || hit('back')) closeConnect();
+    } else if (mode === 'local') {
+      if (V.state === 'over') { if (ok && V.stateT <= 0) toMenu(); }
+      else if (hit('start')) game.togglePause();
+      else if (hit('back') && V.paused) toMenu();
+    } else if (mode === 'net') {
+      if (hit('back')) { leaveNet(); return; }
+      if (net.status === 'playing') {
+        if (V && V.state === 'over') { if (ok && V.stateT <= 0) netSend({ t: 'restart' }); }
+        else if (hit('start')) netSend({ t: 'pause' });
+      } else if (net.status === 'error' && ok) toMenu();
+    }
+  }
+}
+addEventListener('gamepadconnected', e => { menuMsg = 'ГЕЙМПАД ПОДКЛЮЧЁН'; menuMsgT = 3; });
+addEventListener('gamepaddisconnected', e => { menuMsg = 'ГЕЙМПАД ОТКЛЮЧЁН'; menuMsgT = 3; delete padPrev[e.gamepad.index]; });
 function clearKeys() { for (const k in keys) keys[k] = false; dirStack[0].length = dirStack[1].length = 0; }
 
 addEventListener('keydown', e => {
@@ -262,7 +326,7 @@ addEventListener('keydown', e => {
   if (mode === 'menu') {
     if (e.code === 'ArrowUp' || e.code === 'KeyW') menuSel = (menuSel + 2) % 3;
     if (e.code === 'ArrowDown' || e.code === 'KeyS') menuSel = (menuSel + 1) % 3;
-    if (ok) { if (menuSel < 2) startLocal(menuSel === 1); else openConnect(); }
+    if (ok) menuSelect();
   } else if (mode === 'local') {
     if (V.state === 'over') { if (ok && V.stateT <= 0) toMenu(); }
     else if (e.code === 'KeyP' || e.code === 'Escape') game.togglePause();
@@ -282,6 +346,9 @@ addEventListener('keyup', e => {
 addEventListener('blur', clearKeys);
 
 // ===== Режимы =====
+function menuSelect() {
+  if (menuSel < 2) startLocal(menuSel === 1); else openConnect();
+}
 function startLocal(two) {
   game = Tanks.createGame({ emit: (...ev) => handleEvent(ev) });
   game.startGame(two);
@@ -315,7 +382,7 @@ const connectEl = document.getElementById('connect'), addrEl = document.getEleme
 
 function defaultAddr() {
   try { const a = localStorage.getItem('tanks-server'); if (a) return a; } catch (e) {}
-  return location.protocol.startsWith('http') && location.host ? location.host : 'localhost:8080';
+  return location.protocol.startsWith('http') && location.host ? location.host : 'localhost:8081';
 }
 function openConnect() {
   mode = 'connect';
@@ -434,11 +501,10 @@ let drawnGrid = null, drawnVer = -1, lastWF = -1;
 function renderMap(grid, wf) {
   mg.clearRect(0, 0, FS, FS); bg.clearRect(0, 0, FS, FS);
   for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
-    const v = grid[r * N + c], x = c * CELL, y = r * CELL;
-    if (v === BRICK) mg.drawImage(SPR.brick, x, y);
-    else if (v === STEEL) mg.drawImage(SPR.steel, x, y);
-    else if (v === WATER) mg.drawImage(SPR.water[wf], x, y);
-    else if (v === BUSH) bg.drawImage(SPR.bush, x, y);
+    // спрайты 12×12, а клетка 6×6: рисуем нужную четверть спрайта
+    const v = grid[r * N + c], x = c * CELL, y = r * CELL, sx = (c % 2) * CELL, sy = (r % 2) * CELL;
+    const img = v === BRICK ? SPR.brick : v === STEEL ? SPR.steel : v === WATER ? SPR.water[wf] : v === BUSH ? SPR.bush : null;
+    if (img) (v === BUSH ? bg : mg).drawImage(img, sx, sy, CELL, CELL, x, y, CELL, CELL);
   }
 }
 
@@ -737,7 +803,9 @@ function drawTitle() {
   if (menuMsgT > 0) text(menuMsg, W / 2, 448, 10, '#e8402a');
   text('ИГРОК 1: WASD + ПРОБЕЛ', W / 2, 486, 10, '#c8c8c8');
   text('ИГРОК 2: СТРЕЛКИ + ENTER', W / 2, 510, 10, '#c8c8c8');
-  text('(В ОДИНОЧКУ И ПО СЕТИ РАБОТАЮТ И СТРЕЛКИ)', W / 2, 534, 8, '#8a8a8a');
+  text('(В ОДИНОЧКУ И ПО СЕТИ РАБОТАЮТ И СТРЕЛКИ)', W / 2, 530, 8, '#8a8a8a');
+  text('ГЕЙМПАД: КРЕСТОВИНА/СТИК, A — ОГОНЬ, START — ПАУЗА' + (pads.length ? '  [' + pads.length + ']' : ''),
+       W / 2, 550, 8, pads.length ? '#7fd36a' : '#8a8a8a');
   text('ЗАЩИЩАЙ ШТАБ. УНИЧТОЖЬ 20 ТАНКОВ.', W / 2, 572, 10, '#e8b93a');
   text('РЕКОРД ' + hiscore, W / 2, 610, 10, '#ff8a6a');
   if (mode === 'menu' && Math.floor(time * 2) % 2) text('НАЖМИ ENTER', W / 2, 644, 12, '#fff');
@@ -802,6 +870,8 @@ function loop(now) {
   time += dt;
   if (menuMsgT > 0) menuMsgT -= dt;
   if (net.noticeT > 0) net.noticeT -= dt;
+  readPads();
+  padActions();
   if (mode === 'local') {
     game.setInput(0, inputDir(0), fireHeld(0));
     if (V.twoP) game.setInput(1, inputDir(1), fireHeld(1));
