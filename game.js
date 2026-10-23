@@ -410,7 +410,8 @@ function createGame(opts = {}) {
     if (base) { killBullet(b, true); destroyBase(); return; }
     if (hit) { impact(b); killBullet(b, true); return; }
     for (const t of allTanks()) {
-      if (t === b.owner || b.x <= t.x || b.x >= t.x + TS || b.y <= t.y || b.y >= t.y + TS) continue;
+      // пуля 6×6: задевшая край танка (торец гусеницы) — тоже попадание
+      if (t === b.owner || !rectsOverlap(b.x - 3, b.y - 3, 6, 6, t.x, t.y, TS, TS)) continue;
       if (b.player !== t.isPlayer) {
         if (t.isPlayer && t.shield > 0) { killBullet(b, true); return; }
         if (isTrackHit(t, b)) {
