@@ -5,7 +5,10 @@
 
 const CELL = 6, N = 104, FS = CELL * N, TS = 48;        // клетка, клеток по стороне, размер поля, размер танка
 const LC = 12, LN = 52;                                  // клетка и размер сетки разметки уровня
-const EMPTY = 0, BRICK = 1, STEEL = 2, WATER = 3, BUSH = 4, BASE = 6;
+const EMPTY = 0, BRICK = 1, STEEL = 2, WATER = 3, BUSH = 4, ICE = 5, BASE = 6;
+const STAGES = (typeof module !== 'undefined' && module.exports ? require('./stages.js') : root.TanksStages) || [];
+const BOT_TYPES = { basic: 0, fast: 1, power: 2, armor: 3 };
+const ICE_SLIDE = 0.3;                                   // сколько секунд игрок скользит по льду после отпускания
 const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];          // 0 вверх, 1 вправо, 2 вниз, 3 влево
 const BASE_X = 288, BASE_Y = 576;
 const SPAWNS = [0, 288, 576];
@@ -60,8 +63,42 @@ function createGame(opts = {}) {
 
   // Карта строится на сетке разметки 52×52 (клетки по 12 px), а потом каждая клетка
   // разметки становится 2×2 клетками игры: так выстрел снимает четверть стенки, а не половину.
+  // Уровни 1–35 — оригинальные карты Battle City, дальше — сгенерированные.
   function genLevel(lv) {
-    const L = new Uint8Array(LN * LN), li = (c, r) => r * LN + c;
+    const L = new Uint8Array(LN * LN);
+    if (lv <= STAGES.length) classicLayout(STAGES[lv - 1], L); else randomLayout(lv, L);
+    const k = LC / CELL;
+    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) grid[gi(c, r)] = L[Math.floor(r / k) * LN + Math.floor(c / k)];
+    setRing(BRICK);
+    G.gridVer++;
+    G.fullGrid = true;
+    G.changes.length = 0;
+  }
+
+  // Оригинальная карта: 13×13 тайлов, тайл — 4×4 клетки разметки (формат описан в stages.js)
+  function classicLayout(stage, L) {
+    const fill = (c, r, w, h, t) => { for (let y = r; y < r + h; y++) for (let x = c; x < c + w; x++) L[y * LN + x] = t; };
+    const TILE = { x: EMPTY, f: BUSH, r: WATER, s: ICE, e: BASE };
+    stage.map.forEach((line, row) => line.trim().toLowerCase().split(/ +/).forEach((item, col) => {
+      const c = col * 4, r = row * 4, kind = item[0], hex = item.slice(1);
+      if (kind === 'b') {
+        // четверти тайла: верх-лево, верх-право, низ-лево, низ-право; в каждой 2×2 кирпичика
+        const quarters = hex.length === 1 ? [1, 2, 4, 8].map(q => parseInt(hex, 16) & q ? 0xf : 0)
+                                          : Array.from(hex, h => parseInt(h, 16));
+        quarters.forEach((m, q) => {
+          for (let i = 0; i < 4; i++) if (m & (1 << i)) fill(c + (q % 2) * 2 + (i % 2), r + (q >> 1) * 2 + (i >> 1), 1, 1, BRICK);
+        });
+      } else if (kind === 't') {
+        const m = parseInt(hex, 16);
+        for (let q = 0; q < 4; q++) if (m & (1 << q)) fill(c + (q % 2) * 2, r + (q >> 1) * 2, 2, 2, STEEL);
+      } else {
+        fill(c, r, 4, 4, TILE[kind] !== undefined ? TILE[kind] : EMPTY);
+      }
+    }));
+  }
+
+  function randomLayout(lv, L) {
+    const li = (c, r) => r * LN + c;
     const R = mulberry32(lv * 7919 + 13);
     const ri = (a, b) => a + Math.floor(R() * (b - a + 1));
     const put = (c, r, w, h, t) => {
@@ -102,13 +139,6 @@ function createGame(opts = {}) {
     put(22, ri(13, 19) * 2, 8, 2, STEEL);
     if (R() < 0.5) put(22, ri(4, 9) * 2, 8, 2, STEEL);
     put(ri(2, 6) * 2, 46, 2, 6, STEEL);
-
-    const k = LC / CELL;
-    for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) grid[gi(c, r)] = L[li(Math.floor(c / k), Math.floor(r / k))];
-    setRing(BRICK);
-    G.gridVer++;
-    G.fullGrid = true;
-    G.changes.length = 0;
   }
   function ringCells() {
     const out = [];
@@ -171,7 +201,7 @@ function createGame(opts = {}) {
   // ===== Игроки и враги =====
   function makePlayer(id) {
     return { id, isPlayer: true, lives: 3, score: 0, level: 0, x: 0, y: 0, dir: 0, speed: 108, alive: true,
-             respawn: 0, shield: 0, anim: 0, cool: 0, bullets: 0, maxB: 1, bspeed: 340, power: 1, stun: 0, stunSide: 1 };
+             respawn: 0, shield: 0, anim: 0, cool: 0, bullets: 0, maxB: 1, bspeed: 340, power: 1, stun: 0, stunSide: 1, slide: 0 };
   }
   function applyStats(p) {
     p.bspeed = p.level >= 1 ? 540 : 340;
@@ -180,7 +210,7 @@ function createGame(opts = {}) {
   }
   function spawnPlayer(p) {
     p.x = p.id ? 384 : 192; p.y = 576; p.dir = 0;
-    p.alive = true; p.shield = 3; p.respawn = 0; p.cool = 0; p.stun = 0;
+    p.alive = true; p.shield = 3; p.respawn = 0; p.cool = 0; p.stun = 0; p.slide = 0;
     applyStats(p);
   }
   function makeEnemy(s) {
@@ -191,6 +221,15 @@ function createGame(opts = {}) {
              score: T.score, alive: true, stun: 0, stunSide: 1 };
   }
   function buildQueue(lv) {
+    // оригинальный уровень: враги в том порядке, что и в Battle City
+    if (lv <= STAGES.length) {
+      const out = [];
+      for (const g of STAGES[lv - 1].bots) {
+        const [n, type] = g.split('*');
+        for (let i = 0; i < +n; i++) out.push(BOT_TYPES[type.trim()]);
+      }
+      return out;
+    }
     const R = mulberry32(lv * 31 + 5), q = [];
     const a = Math.min(0.02 + lv * 0.03, 0.3), p = Math.min(0.04 + lv * 0.03, 0.3), f = Math.min(0.12 + lv * 0.02, 0.3);
     for (let i = 0; i < 20; i++) {
@@ -215,11 +254,11 @@ function createGame(opts = {}) {
   }
 
   // ===== Ход игры =====
-  function startGame(two) {
+  function startGame(two, fromLevel = 1) {
     G.twoP = !!two;
     G.players = [makePlayer(0)];
     if (two) G.players.push(makePlayer(1));
-    G.level = 1;
+    G.level = Math.max(1, Math.floor(fromLevel) || 1);
     for (const i of G.inputs) { i.dir = -1; i.fire = false; }
     startLevel();
   }
@@ -460,7 +499,16 @@ function createGame(opts = {}) {
       if (p.stun > 0) p.stun -= dt;
       if (!G.baseAlive) continue;
       const inp = G.inputs[p.id];
-      if (inp.dir >= 0 && p.stun <= 0) { turn(p, inp.dir); p.anim += moveTank(p, p.speed * dt); }
+      const onIce = cellAt(Math.floor((p.x + 24) / CELL), Math.floor((p.y + 24) / CELL)) === ICE;
+      if (inp.dir >= 0 && p.stun <= 0) {
+        turn(p, inp.dir);
+        p.anim += moveTank(p, p.speed * dt);
+        p.slide = onIce ? ICE_SLIDE : 0;
+      } else if (p.slide > 0 && p.stun <= 0 && onIce) {
+        // на льду танк по инерции проезжает ещё немного
+        p.slide -= dt;
+        if (moveTank(p, p.speed * dt) === 0) p.slide = 0;
+      } else p.slide = 0;
       if (inp.fire) fire(p);
       for (const u of G.powerups) {
         if (!u.taken && rectsOverlap(p.x + 6, p.y + 6, 36, 36, u.x, u.y, TS, TS)) { u.taken = true; applyPU(p, u.type); }
@@ -544,7 +592,8 @@ function createGame(opts = {}) {
   return { G, startGame, tick, setInput, togglePause };
 }
 
-const api = { createGame, CELL, N, FS, TS, EMPTY, BRICK, STEEL, WATER, BUSH, BASE, DX, DY, BASE_X, BASE_Y, STUN_TIME };
+const api = { createGame, CELL, N, FS, TS, EMPTY, BRICK, STEEL, WATER, BUSH, ICE, BASE, DX, DY, BASE_X, BASE_Y, STUN_TIME,
+              CLASSIC_STAGES: STAGES.length };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.Tanks = api;
 })(typeof self !== 'undefined' ? self : this);

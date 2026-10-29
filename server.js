@@ -11,7 +11,7 @@ const Tanks = require('./game.js');
 
 const PORT = Number(process.env.PORT) || 8081;
 const TICK = 1000 / 60;
-const STATIC = { '/': 'index.html', '/index.html': 'index.html', '/game.js': 'game.js' };
+const STATIC = { '/': 'index.html', '/index.html': 'index.html', '/game.js': 'game.js', '/stages.js': 'stages.js' };
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 
 const server = http.createServer((req, res) => {

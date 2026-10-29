@@ -27,6 +27,7 @@
 ## Файлы
 
 - `game.js` — логика игры, общая для браузера и сервера
+- `stages.js` — 35 уровней оригинальной Battle City (данные из [feichao93/battle-city](https://github.com/feichao93/battle-city), MIT)
 - `index.html` — отрисовка, звук, управление, меню и сетевой клиент
 - `server.js` — HTTP-сервер для файлов игры и WebSocket-комнаты на двух игроков
 - [docs/PLAN.md](docs/PLAN.md) — задание и как оно менялось
