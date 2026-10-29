@@ -13,6 +13,9 @@ const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];          // 0 вверх, 1 впр
 const BASE_X = 288, BASE_Y = 576;
 const SPAWNS = [0, 288, 576];
 const STUN_TIME = 3;
+// Попадание в гусеницу обездвиживает танк вместо поражения. Пока выключено:
+// любое попадание поражает танк, как в оригинальной игре.
+const TRACK_HITS = false;
 const ETYPES = [
   { speed: 48,  bspeed: 260, hp: 1, score: 100 }, // обычный
   { speed: 100, bspeed: 300, hp: 1, score: 200 }, // быстрый
@@ -453,7 +456,7 @@ function createGame(opts = {}) {
       if (t === b.owner || !rectsOverlap(b.x - 3, b.y - 3, 6, 6, t.x, t.y, TS, TS)) continue;
       if (b.player !== t.isPlayer) {
         if (t.isPlayer && t.shield > 0) { killBullet(b, true); return; }
-        if (isTrackHit(t, b)) {
+        if (TRACK_HITS && isTrackHit(t, b)) {
           if (!t.isPlayer && t.bonus) { t.bonus = false; spawnPowerup(); }
           stunTank(t, b);
           killBullet(b, true);
