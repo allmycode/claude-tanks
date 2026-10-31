@@ -169,10 +169,43 @@ const SFX = {
   boom: () => { noise(0.7, 0.32, 900); tone(120, 40, 0.5, 'sine', 0.15); },
   bonusAppear: () => [660, 880, 660, 880].forEach((f, i) => tone(f, f, 0.06, 'square', 0.04, i * 0.06)),
   power: () => [523, 659, 784, 1046, 1318].forEach((f, i) => tone(f, f, 0.08, 'square', 0.05, i * 0.06)),
-  start: () => [392, 523, 659, 784, 659, 784].forEach((f, i) => tone(f, f, 0.12, 'square', 0.05, i * 0.12)),
+  start: () => {
+    // своя короткая мелодия перед уровнем: ведущий голос и бас
+    let t = 0;
+    [[392, 0.12], [523, 0.12], [659, 0.12], [784, 0.24], [659, 0.12], [784, 0.12], [1047, 0.42]]
+      .forEach(([f, d]) => { tone(f, f, d * 0.9, 'square', 0.05, t); t += d; });
+    t = 0;
+    [[131, 0.48], [98, 0.36], [131, 0.42]].forEach(([f, d]) => { tone(f, f, d * 0.9, 'triangle', 0.09, t); t += d; });
+  },
   win: () => [523, 659, 784, 1046].forEach((f, i) => tone(f, f, 0.15, 'triangle', 0.08, i * 0.13)),
   over: () => [392, 330, 262, 196].forEach((f, i) => tone(f, f * 0.98, 0.25, 'triangle', 0.08, i * 0.22)),
 };
+
+// Звук мотора: непрерывный низкий гул, при движении — выше и чаще
+let engine = null;
+function updateEngine() {
+  if (!AC) return;
+  if (!engine) {
+    const o = AC.createOscillator(), lfo = AC.createOscillator(), depth = AC.createGain();
+    const f = AC.createBiquadFilter(), g = AC.createGain();
+    o.type = 'sawtooth'; o.frequency.value = 50;
+    lfo.type = 'square'; lfo.frequency.value = 14; depth.gain.value = 10;
+    lfo.connect(depth).connect(o.frequency);
+    f.type = 'lowpass'; f.frequency.value = 420;
+    g.gain.value = 0;
+    o.connect(f).connect(g).connect(AC.destination);
+    o.start(); lfo.start();
+    engine = { o, lfo, g };
+  }
+  // свои танки: в сетевой игре — свой, в локальной — все игроки
+  const mine = !V ? [] : mode === 'net' ? [V.players[net.slot]].filter(Boolean) : mode === 'local' ? V.players : [];
+  const active = !muted && V && (V.state === 'play' || V.state === 'done') && !V.paused && mine.some(p => p.alive);
+  const moving = active && mine.some(p => p.alive && inputDir(mode === 'net' ? 0 : p.id) >= 0);
+  const t = AC.currentTime;
+  engine.g.gain.setTargetAtTime(active ? (moving ? 0.05 : 0.028) : 0, t, 0.06);
+  engine.o.frequency.setTargetAtTime(moving ? 78 : 50, t, 0.08);
+  engine.lfo.frequency.setTargetAtTime(moving ? 24 : 14, t, 0.08);
+}
 
 // ===== Состояние клиента =====
 // mode: menu | connect | local | net.  V — то, что рисуем: состояние локальной игры или снимок с сервера.
@@ -184,6 +217,7 @@ let game = null, V = null;
 let effects = [], particles = [], popups = [], shake = 0, time = 0;
 let hiscore = 0, hiDirty = false, lastState = '';
 try { hiscore = +localStorage.getItem('tanks-hiscore') || 0; } catch (e) {}
+hiscore = Math.max(hiscore, 20000);       // стартовый рекорд, как в оригинале
 
 // События логики: звуки и эффекты
 function handleEvent(ev) {
@@ -419,7 +453,7 @@ connectEl.addEventListener('keydown', e => {
 });
 
 function newNetView() {
-  return { state: 'intro', stateT: 2, level: 1, twoP: true, paused: false, freeze: 0, baseAlive: true,
+  return { state: 'intro', stateT: 2, level: 1, twoP: true, paused: false, freeze: 0, baseAlive: true, tallyBonus: -1,
            players: [], enemies: [], bullets: [], powerups: [], stars: [], queue: [],
            grid: new Uint8Array(N * N), gridVer: 0 };
 }
@@ -495,8 +529,9 @@ function applySnapshot(m) {
   if (net.snapAt) net.snapGap = net.snapGap * 0.8 + Math.min(100, now - net.snapAt) * 0.2;
   net.snapAt = now;
   v.state = m.st; v.stateT = m.stT; v.level = m.lv; v.paused = m.pa; v.freeze = m.fr; v.baseAlive = m.ba; v.queue = m.q;
+  v.tallyBonus = m.tb;
   v.players = withPrev(m.pl.map((a, i) => ({ id: i, isPlayer: true, alive: !!a[0], sx: a[1], sy: a[2], dir: a[3], lives: a[4],
-    score: a[5], level: a[6], shield: a[7], stun: a[8], stunSide: a[9], anim: a[10] })), v.players);
+    score: a[5], level: a[6], shield: a[7], stun: a[8], stunSide: a[9], anim: a[10], frozen: a[11], kills: a[12] })), v.players);
   v.enemies = withPrev(m.en.map(a => ({ isPlayer: false, alive: true, sx: a[0], sy: a[1], dir: a[2], type: a[3], hp: a[4],
     bonus: !!a[5], stun: a[6], stunSide: a[7], anim: a[8], id: a[9] })), v.enemies);
   v.bullets = withPrev(m.bu.map(a => ({ sx: a[0], sy: a[1], dir: a[2], player: !!a[3], id: a[4] })), v.bullets);
@@ -546,6 +581,7 @@ function tankColors(t) {
   return t.type === 3 ? ARMOR_COL[Math.max(1, t.hp)] : ECOL[t.type];
 }
 function drawTank(t) {
+  if (t.frozen > 0 && Math.floor(time * 8) % 2) return;   // подбит напарником — мигает
   const [main, dark, light] = tankColors(t);
   const fast = !t.isPlayer && t.type === 1, armor = !t.isPlayer && t.type === 3, power = !t.isPlayer && t.type === 2;
   ctx.save();
@@ -845,6 +881,72 @@ function drawNetStatus() {
   if (net.status !== 'error') text('ESC — ОТМЕНА', W / 2, 520, 10, '#ccc');
 }
 
+// ===== Табло после уровня, как в оригинале =====
+// Строки по типам врагов появляются по очереди, числа «досчитываются», внизу — итог и бонус.
+const TALLY_ROW = 0.7;
+function tallyElapsed() { return Tanks.DONE_TIME - V.stateT - Tanks.TALLY_DELAY; }
+function tallyShown(kills, row, el) {
+  const k = (el - row * TALLY_ROW) / (TALLY_ROW * 0.8);
+  return k <= 0 ? -1 : Math.min(kills, Math.floor(k * (kills + 1)));
+}
+let tallyTicks = 0;
+function tallySound() {
+  if (!V || V.state !== 'done' || tallyElapsed() < 0) { tallyTicks = 0; return; }
+  const el = tallyElapsed();
+  let n = 0;
+  V.players.forEach(p => p.kills.forEach((k, row) => { n += Math.max(0, tallyShown(k, row, el)); }));
+  if (n > tallyTicks) tone(1200, 1200, 0.03, 'square', 0.03);
+  tallyTicks = n;
+}
+function drawTally() {
+  const el = tallyElapsed(), cx = W / 2, ET = Tanks.ETYPES;
+  const colL = cx - 70, colR = cx + 70;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  text('РЕКОРД', cx - 20, 50, 12, '#e8402a', 'right');
+  text(String(hiscore), cx + 10, 50, 12, '#ffa040', 'left');
+  text('УРОВЕНЬ ' + V.level, cx, 92, 14, '#fff');
+  V.players.forEach((p, i) => {
+    const x = i ? colR + 150 : colL - 150, al = i ? 'left' : 'right';
+    text(i ? 'II ИГРОК' : 'I ИГРОК', i ? colR + 40 : colL - 40, 140, 12, '#e8402a', al);
+    text(String(p.score), i ? colR + 40 : colL - 40, 170, 12, '#ffa040', al);
+  });
+  for (let row = 0; row < 4; row++) {
+    const y = 230 + row * 62;
+    ctx.save(); ctx.translate(cx, y); ctx.scale(0.62, 0.62);
+    drawTank({ x: -24, y: -24, dir: 0, isPlayer: false, type: row, hp: row === 3 ? 4 : 1, anim: 0, shield: 0, stun: 0 });
+    ctx.restore();
+    V.players.forEach((p, i) => {
+      const n = tallyShown(p.kills[row], row, el);
+      if (n < 0) return;
+      if (i === 0) {
+        text(String(n * ET[row].score).padStart(4), colL - 150, y, 12, '#fff', 'left');
+        text('ОЧК', colL - 90, y, 10, '#fff', 'left');
+        text(String(n), colL - 4, y, 12, '#fff', 'right');
+        text('<', colL + 18, y, 12, '#fff');
+      } else {
+        text('>', colR - 18, y, 12, '#fff');
+        text(String(n), colR + 4, y, 12, '#fff', 'left');
+        text('ОЧК', colR + 40, y, 10, '#fff', 'left');
+        text(String(n * ET[row].score), colR + 150, y, 12, '#fff', 'right');
+      }
+    });
+  }
+  const totalAt = 4 * TALLY_ROW;
+  if (el >= totalAt) {
+    ctx.fillStyle = '#fff'; ctx.fillRect(colL - 150, 474, colR + 150 - (colL - 150), 3);
+    text('ВСЕГО', colL - 150, 502, 12, '#fff', 'left');
+    V.players.forEach((p, i) => {
+      const total = p.kills.reduce((s, k) => s + k, 0);
+      text(String(total), i ? colR + 4 : colL - 4, 502, 12, '#fff', i ? 'left' : 'right');
+    });
+  }
+  if (el >= totalAt + 0.6 && V.tallyBonus >= 0) {
+    const x = V.tallyBonus ? colR + 40 : colL - 40, al = V.tallyBonus ? 'left' : 'right';
+    text('БОНУС', x, 548, 12, '#e8402a', al);
+    text(Tanks.TALLY_BONUS + ' ОЧК', x, 576, 12, '#fff', al);
+  }
+}
+
 function draw() {
   if (mode === 'menu' || mode === 'connect') { drawTitle(); return; }
   if (mode === 'net' && (net.status !== 'playing' || !V)) { drawNetStatus(); return; }
@@ -857,9 +959,8 @@ function draw() {
     ctx.fillRect(OX, OY, FS, FS);
     text('УРОВЕНЬ ' + V.level, OX + FS / 2, OY + FS / 2, 24, `rgba(0,0,0,${a})`);
   } else if (V.state === 'done') {
-    const lines = [['УРОВЕНЬ ' + V.level + ' ПРОЙДЕН!', 16, '#ffd23a']];
-    V.players.forEach((p, i) => lines.push([(i ? 'II' : 'I') + ' ИГРОК: ' + p.score, 12, '#fff']));
-    curtainBox(lines);
+    if (Tanks.DONE_TIME - V.stateT < Tanks.TALLY_DELAY) curtainBox([['УРОВЕНЬ ' + V.level + ' ПРОЙДЕН!', 16, '#ffd23a']]);
+    else { drawTally(); return; }
   } else if (V.state === 'dying') {
     const k = Math.min(1, 3 - V.stateT);
     text('ИГРА ОКОНЧЕНА', OX + FS / 2, OY + FS + 20 - k * (FS / 2 + 20), 24, '#e8402a');
@@ -898,6 +999,8 @@ function loop(now) {
   }
   updateFx(dt);
   trackHiscore();
+  updateEngine();
+  tallySound();
   draw();
   requestAnimationFrame(loop);
 }

@@ -49,7 +49,8 @@ function snapshot(G, events) {
   const m = {
     t: 's', st: G.state, stT: r1(G.stateT), lv: G.level, pa: G.paused, fr: r1(G.freeze), ba: G.baseAlive, q: G.queue,
     pl: G.players.map(p => [p.alive ? 1 : 0, r1(p.x), r1(p.y), p.dir, p.lives, p.score, p.level,
-                            r1(p.shield), r1(p.stun), p.stunSide, r1(p.anim % 6)]),
+                            r1(p.shield), r1(p.stun), p.stunSide, r1(p.anim % 6), r1(p.frozen), p.kills]),
+    tb: G.tallyBonus,
     en: G.enemies.map(e => [r1(e.x), r1(e.y), e.dir, e.type, e.hp, e.bonus ? 1 : 0, r1(e.stun), e.stunSide, r1(e.anim % 6), e.id]),
     bu: G.bullets.map(b => [r1(b.x), r1(b.y), b.dir, b.player ? 1 : 0, b.id]),
     pu: G.powerups.map(u => [u.type, u.x, u.y, r1(u.t)]),

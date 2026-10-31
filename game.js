@@ -22,7 +22,12 @@ const ETYPES = [
   { speed: 58,  bspeed: 450, hp: 1, score: 300 }, // скорострельный
   { speed: 46,  bspeed: 300, hp: 4, score: 400 }, // броневик
 ];
-const PU_TYPES = ['helmet', 'star', 'grenade', 'clock', 'shovel', 'tank'];
+// Бонусы и их веса при выпадении: звезда выпадает вдвое чаще остальных (2 из 7, около 29%)
+const PU_WEIGHTS = { helmet: 1, star: 2, grenade: 1, clock: 1, shovel: 1, tank: 1 };
+const EXTRA_LIFE_SCORE = 20000;                          // разовая дополнительная жизнь, как в оригинале
+const PARTNER_FREEZE = 3;                                // сколько секунд стоит танк, подбитый напарником
+const DONE_TIME = 8, TALLY_DELAY = 1.5;                  // длительность фазы «уровень пройден» и пауза до табло
+const TALLY_BONUS = 1000;                                // при игре вдвоём — тому, кто уничтожил больше врагов
 
 function mulberry32(a) {
   return function () {
@@ -44,7 +49,7 @@ function createGame(opts = {}) {
   const G = {
     state: 'intro', stateT: 0, level: 1, twoP: false, paused: false,
     players: [], enemies: [], bullets: [], powerups: [], stars: [], queue: [],
-    spawnTimer: 0, spawnIdx: 0, nextId: 0, freeze: 0, shovel: 0, baseAlive: true,
+    spawnTimer: 0, spawnIdx: 0, nextId: 0, freeze: 0, shovel: 0, baseAlive: true, stageTime: 0, tallyBonus: -1,
     grid: new Uint8Array(N * N), gridVer: 0, fullGrid: true, changes: [],
     inputs: [{ dir: -1, fire: false }, { dir: -1, fire: false }],
   };
@@ -69,7 +74,7 @@ function createGame(opts = {}) {
   // Уровни 1–35 — оригинальные карты Battle City, дальше — сгенерированные.
   function genLevel(lv) {
     const L = new Uint8Array(LN * LN);
-    if (lv <= STAGES.length) classicLayout(STAGES[lv - 1], L); else randomLayout(lv, L);
+    if (STAGES.length) classicLayout(STAGES[(lv - 1) % STAGES.length], L); else randomLayout(lv, L);
     const k = LC / CELL;
     for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) grid[gi(c, r)] = L[Math.floor(r / k) * LN + Math.floor(c / k)];
     setRing(BRICK);
@@ -204,7 +209,17 @@ function createGame(opts = {}) {
   // ===== Игроки и враги =====
   function makePlayer(id) {
     return { id, isPlayer: true, lives: 3, score: 0, level: 0, x: 0, y: 0, dir: 0, speed: 108, alive: true,
-             respawn: 0, shield: 0, anim: 0, cool: 0, bullets: 0, maxB: 1, bspeed: 340, power: 1, stun: 0, stunSide: 1, slide: 0 };
+             respawn: 0, shield: 0, anim: 0, cool: 0, bullets: 0, maxB: 1, bspeed: 340, power: 1, stun: 0, stunSide: 1, slide: 0,
+             frozen: 0, kills: [0, 0, 0, 0], extraLife: false };
+  }
+  function addScore(p, n) {
+    p.score += n;
+    if (!p.extraLife && p.score >= EXTRA_LIFE_SCORE) {
+      p.extraLife = true;
+      p.lives++;
+      sfx('power');
+      emit('popup', Math.round(p.x + 24), Math.round(p.y + 8), '1UP');
+    }
   }
   function applyStats(p) {
     p.bspeed = p.level >= 1 ? 540 : 340;
@@ -213,23 +228,31 @@ function createGame(opts = {}) {
   }
   function spawnPlayer(p) {
     p.x = p.id ? 384 : 192; p.y = 576; p.dir = 0;
-    p.alive = true; p.shield = 3; p.respawn = 0; p.cool = 0; p.stun = 0; p.slide = 0;
+    p.alive = true; p.shield = 3; p.respawn = 0; p.cool = 0; p.stun = 0; p.slide = 0; p.frozen = 0;
     applyStats(p);
   }
+  // Номер круга: после 35-го уровня карты идут заново с 1-й, а враги становятся сильнее
+  const lapOf = lv => STAGES.length ? Math.floor((lv - 1) / STAGES.length) : 0;
   function makeEnemy(s) {
     const T = ETYPES[s.type];
+    const speedUp = (1 + Math.min(G.level - 1, 10) * 0.025) * (1 + 0.1 * Math.min(lapOf(G.level), 4));
     return { id: ++G.nextId, x: s.x, y: s.y, dir: 2, isPlayer: false, type: s.type, hp: T.hp,
-             speed: T.speed * (1 + Math.min(G.level - 1, 10) * 0.025), bspeed: T.bspeed, maxB: 1, power: 1,
+             speed: T.speed * speedUp, bspeed: T.bspeed, maxB: 1, power: 1,
              bullets: 0, cool: 0, anim: 0, bonus: s.bonus, ai: rand(0.5, 2), shootT: rand(0.4, 1.2),
              score: T.score, alive: true, stun: 0, stunSide: 1 };
   }
   function buildQueue(lv) {
-    // оригинальный уровень: враги в том порядке, что и в Battle City
-    if (lv <= STAGES.length) {
-      const out = [];
-      for (const g of STAGES[lv - 1].bots) {
+    // оригинальный уровень: враги в том порядке, что и в Battle City;
+    // на следующих кругах часть врагов заменяется на более сильный тип
+    if (STAGES.length) {
+      const lap = lapOf(lv), R = mulberry32(lv * 131 + 7), out = [];
+      for (const g of STAGES[(lv - 1) % STAGES.length].bots) {
         const [n, type] = g.split('*');
-        for (let i = 0; i < +n; i++) out.push(BOT_TYPES[type.trim()]);
+        for (let i = 0; i < +n; i++) {
+          let t = BOT_TYPES[type.trim()];
+          if (t < 3 && R() < Math.min(lap * 0.25, 0.75)) t++;
+          out.push(t);
+        }
       }
       return out;
     }
@@ -249,8 +272,9 @@ function createGame(opts = {}) {
       const x = SPAWNS[(G.spawnIdx + k) % 3];
       if (!G.stars.some(s => s.x === x)) {
         G.spawnIdx = (G.spawnIdx + k + 1) % 3;
-        const n = 20 - G.queue.length;
-        G.stars.push({ x, y: 0, t: 1, type: G.queue.shift(), bonus: n === 3 || n === 10 || n === 17 });
+        const n = 20 - G.queue.length, bonus = n === 3 || n === 10 || n === 17;
+        if (bonus) G.powerups = [];                // как в оригинале: новый бонусный танк убирает старый бонус
+        G.stars.push({ x, y: 0, t: 1, type: G.queue.shift(), bonus });
         return;
       }
     }
@@ -270,8 +294,10 @@ function createGame(opts = {}) {
     genLevel(G.level);
     G.queue = buildQueue(G.level);
     G.spawnIdx = 0; G.spawnTimer = 0.2; G.freeze = 0; G.shovel = 0; G.baseAlive = true; G.paused = false;
+    G.stageTime = 0; G.tallyBonus = -1;
     for (const p of G.players) {
       p.bullets = 0;
+      p.kills = [0, 0, 0, 0];
       if (p.alive || p.respawn > 0) spawnPlayer(p);
     }
     G.state = 'intro'; G.stateT = 2;
@@ -287,7 +313,7 @@ function createGame(opts = {}) {
     if (t.isPlayer) sfx('shoot');
   }
 
-  function pickDir(e) {
+  function pickDir(e, avoid) {
     const r = Math.random(), cx = e.x + 24, cy = e.y + 24;
     const toward = (tx, ty) => {
       const ax = Math.abs(tx - cx), ay = Math.abs(ty - cy);
@@ -295,27 +321,44 @@ function createGame(opts = {}) {
       return ty > cy ? 2 : 0;
     };
     const alive = G.players.filter(p => p.alive);
+    // как в оригинале: чем дольше идёт уровень, тем настойчивее враги идут к штабу
+    const baseP = Math.min(0.2 + G.stageTime / 150, 0.7), playerP = Math.min(0.25, 0.9 - baseP);
     let d;
-    if (r < 0.4) d = toward(BASE_X + 24, BASE_Y + 24);
-    else if (r < 0.65 && alive.length) {
+    if (r < baseP) d = toward(BASE_X + 24, BASE_Y + 24);
+    else if (r < baseP + playerP && alive.length) {
       const p = alive[Math.floor(Math.random() * alive.length)];
       d = toward(p.x + 24, p.y + 24);
     } else d = Math.floor(Math.random() * 4);
+    // упёрся — не пытаться ехать туда же
+    if (avoid && d === e.dir) d = (e.dir + 1 + Math.floor(Math.random() * 3)) % 4;
     turn(e, d);
   }
 
-  function enemyAI(e, dt) {
-    if (e.stun <= 0) {                         // с перебитой гусеницей стоит, но стреляет
-      e.ai -= dt;
-      const want = e.speed * dt;
-      const m = moveTank(e, want);
-      e.anim += m;
-      if (m < want - 0.01) {
-        e.shootT -= dt * 2;                    // упёрся — чаще стреляет
-        if (Math.random() < 0.06) e.ai = Math.min(e.ai, 0);
-      }
-      if (e.ai <= 0) { pickDir(e); e.ai = rand(0.7, 2.6); }
+  // Враг едет до следующей границы полутайла (24 px) и только там может сменить направление
+  function enemyMove(e, dt) {
+    e.ai -= dt;
+    const want = e.speed * dt;
+    const vert = e.dir % 2 === 0, pos = vert ? e.y : e.x, fwd = e.dir === 1 || e.dir === 2;
+    const next = fwd ? Math.floor(pos / 24 + 1e-6) * 24 + 24 : Math.ceil(pos / 24 - 1e-6) * 24 - 24;
+    const dist = Math.abs(next - pos);
+    const step = Math.min(want, dist);
+    const m = moveTank(e, step);
+    e.anim += m;
+    if (m < step - 0.01) {
+      e.shootT -= dt * 2;                      // упёрся — чаще стреляет, чтобы пробить кирпич
+      e.blockedT = (e.blockedT || 0) + dt;
+      if (e.blockedT > 0.25) { e.blockedT = 0; pickDir(e, true); e.ai = rand(0.6, 2.2); }
+      return;
     }
+    e.blockedT = 0;
+    if (step >= dist - 1e-6) {
+      if (vert) e.y = next; else e.x = next;   // ровно на границе
+      if (e.ai <= 0) { pickDir(e); e.ai = rand(0.6, 2.2); }
+    }
+  }
+
+  function enemyAI(e, dt) {
+    if (e.stun <= 0) enemyMove(e, dt);         // с перебитой гусеницей стоит, но стреляет
 
     // прицел: игрок или штаб на линии огня
     const cx = e.x + 24, cy = e.y + 24;
@@ -338,7 +381,8 @@ function createGame(opts = {}) {
     boom(e.x + 24, e.y + 24, true);
     sfx('boom');
     if (by) {
-      by.score += e.score;
+      by.kills[e.type]++;
+      addScore(by, e.score);
       emit('popup', Math.round(e.x + 24), Math.round(e.y + 24), String(e.score));
     }
   }
@@ -389,11 +433,14 @@ function createGame(opts = {}) {
       y = Math.floor(Math.random() * 22) * 24;
       tries++;
     } while (tries < 30 && rectsOverlap(x, y, TS, TS, 216, 528, 192, 96));
-    G.powerups = [{ type: PU_TYPES[Math.floor(Math.random() * PU_TYPES.length)], x, y, t: 18 }];
+    const types = Object.keys(PU_WEIGHTS), total = types.reduce((s, k) => s + PU_WEIGHTS[k], 0);
+    let r = Math.random() * total, type = types[0];
+    for (const k of types) { r -= PU_WEIGHTS[k]; if (r < 0) { type = k; break; } }
+    G.powerups = [{ type, x, y, t: 18 }];
     sfx('bonusAppear');
   }
   function applyPU(p, type) {
-    p.score += 500;
+    addScore(p, 500);
     emit('popup', Math.round(p.x + 24), Math.round(p.y + 24), '500');
     sfx('power');
     switch (type) {
@@ -466,7 +513,12 @@ function createGame(opts = {}) {
         killBullet(b, t.alive);
         return;
       }
-      if (b.player && t.isPlayer) { killBullet(b, true); return; }
+      if (b.player && t.isPlayer) {
+        // как в оригинале: подбитый напарником танк на время замирает (стрелять может)
+        if (t.shield <= 0) { t.frozen = PARTNER_FREEZE; sfx('armor'); }
+        killBullet(b, true);
+        return;
+      }
       // вражеские пули пролетают сквозь своих
     }
   }
@@ -492,6 +544,7 @@ function createGame(opts = {}) {
   // ===== Обновление =====
   function update(dt) {
     if (G.freeze > 0) G.freeze -= dt;
+    G.stageTime += dt;
     for (const p of G.players) {
       if (!p.alive) {
         if (p.respawn > 0) { p.respawn -= dt; if (p.respawn <= 0) spawnPlayer(p); }
@@ -500,14 +553,16 @@ function createGame(opts = {}) {
       p.cool -= dt;
       if (p.shield > 0) p.shield -= dt;
       if (p.stun > 0) p.stun -= dt;
+      if (p.frozen > 0) p.frozen -= dt;
+      const canMove = p.stun <= 0 && p.frozen <= 0;
       if (!G.baseAlive) continue;
       const inp = G.inputs[p.id];
       const onIce = cellAt(Math.floor((p.x + 24) / CELL), Math.floor((p.y + 24) / CELL)) === ICE;
-      if (inp.dir >= 0 && p.stun <= 0) {
+      if (inp.dir >= 0 && canMove) {
         turn(p, inp.dir);
         p.anim += moveTank(p, p.speed * dt);
         p.slide = onIce ? ICE_SLIDE : 0;
-      } else if (p.slide > 0 && p.stun <= 0 && onIce) {
+      } else if (p.slide > 0 && canMove && onIce) {
         // на льду танк по инерции проезжает ещё немного
         p.slide -= dt;
         if (moveTank(p, p.speed * dt) === 0) p.slide = 0;
@@ -552,7 +607,12 @@ function createGame(opts = {}) {
         G.state = 'dying'; G.stateT = 3;
         sfx('over');
       } else if (!G.queue.length && !G.enemies.length && !G.stars.length) {
-        G.state = 'done'; G.stateT = 4;
+        G.state = 'done'; G.stateT = DONE_TIME;
+        // при игре вдвоём тот, кто уничтожил больше врагов, получает бонус
+        if (G.players.length === 2) {
+          const [a, b] = G.players.map(p => p.kills.reduce((s, k) => s + k, 0));
+          if (a !== b) { G.tallyBonus = a > b ? 0 : 1; addScore(G.players[G.tallyBonus], TALLY_BONUS); }
+        }
         sfx('win');
       }
     }
@@ -596,7 +656,7 @@ function createGame(opts = {}) {
 }
 
 const api = { createGame, CELL, N, FS, TS, EMPTY, BRICK, STEEL, WATER, BUSH, ICE, BASE, DX, DY, BASE_X, BASE_Y, STUN_TIME,
-              CLASSIC_STAGES: STAGES.length };
+              CLASSIC_STAGES: STAGES.length, ETYPES, DONE_TIME, TALLY_DELAY, TALLY_BONUS, PARTNER_FREEZE };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.Tanks = api;
 })(typeof self !== 'undefined' ? self : this);
