@@ -14,6 +14,34 @@ const TICK = 1000 / 60;
 const STATIC = { '/': 'index.html', '/index.html': 'index.html', '/game.js': 'game.js', '/stages.js': 'stages.js' };
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
 
+// Настройки сервера: config.json рядом с server.js (или путь в TANKS_CONFIG).
+// Файл перечитывается при старте каждой новой игры, так что правки действуют без перезапуска.
+const CONFIG_PATH = process.env.TANKS_CONFIG || path.join(__dirname, 'config.json');
+let lastConfigText = null, config = {};
+function loadConfig() {
+  let text;
+  try { text = fs.readFileSync(CONFIG_PATH, 'utf8'); } catch (e) {
+    if (lastConfigText !== '') console.log(`Настройки: ${CONFIG_PATH} не найден — используются значения по умолчанию`);
+    lastConfigText = ''; config = {};
+    return config;
+  }
+  if (text === lastConfigText) return config;
+  lastConfigText = text;
+  let raw;
+  try { raw = JSON.parse(text.replace(/^﻿/, '')); } catch (e) {
+    console.log(`Настройки: ошибка в ${CONFIG_PATH}: ${e.message} — используются значения по умолчанию`);
+    config = {};
+    return config;
+  }
+  const { weights, problems } = Tanks.sanitizeWeights(raw.powerups);
+  for (const p of problems) console.log('Настройки: ' + p);
+  config = { powerupWeights: weights };
+  const w = weights || Tanks.PU_WEIGHTS, total = Object.values(w).reduce((s, v) => s + v, 0);
+  console.log('Настройки: выпадение бонусов — ' +
+    Object.keys(w).map(k => `${k} ${(100 * w[k] / total).toFixed(1)}%`).join(', '));
+  return config;
+}
+
 const server = http.createServer((req, res) => {
   const file = STATIC[req.url.split('?')[0]];
   if (!file) { res.writeHead(404); res.end('Not found'); return; }
@@ -65,7 +93,8 @@ function snapshot(G, events) {
 function startRoom(clients) {
   const id = ++roomCount;
   const events = [];
-  const game = Tanks.createGame({ emit: (...ev) => events.push(ev), trackChanges: true });
+  const game = Tanks.createGame({ emit: (...ev) => events.push(ev), trackChanges: true,
+                                  powerupWeights: loadConfig().powerupWeights });
   const room = { id, clients, game };
   clients.forEach((c, i) => { c.room = room; c.slot = i; send(c, { t: 'start', slot: i }); });
   game.startGame(true);
@@ -138,4 +167,5 @@ server.listen(PORT, () => {
     }
   }
   console.log('В меню игры выберите «ПО СЕТИ» и укажите адрес сервера.');
+  loadConfig();
 });

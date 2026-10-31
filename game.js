@@ -22,8 +22,27 @@ const ETYPES = [
   { speed: 58,  bspeed: 450, hp: 1, score: 300 }, // скорострельный
   { speed: 46,  bspeed: 300, hp: 4, score: 400 }, // броневик
 ];
-// Бонусы и их веса при выпадении: звезда выпадает вдвое чаще остальных (2 из 7, около 29%)
-const PU_WEIGHTS = { helmet: 1, star: 2, grenade: 1, clock: 1, shovel: 1, tank: 1 };
+// Бонусы и их веса при выпадении: звезда выпадает в 1,3 раза чаще остальных (около 20,6% против 15,9%)
+const PU_WEIGHTS = { helmet: 1, star: 1.3, grenade: 1, clock: 1, shovel: 1, tank: 1 };
+
+// Проверка весов бонусов из настроек: только известные бонусы, числа >= 0, хотя бы один больше нуля.
+// Бонус, которого нет в настройках, не выпадает. Возвращает { weights | null, problems: [...] }.
+function sanitizeWeights(src) {
+  if (src == null) return { weights: null, problems: [] };
+  if (typeof src !== 'object' || Array.isArray(src)) return { weights: null, problems: ['ожидался объект { бонус: процент }'] };
+  const problems = [], weights = {};
+  for (const k of Object.keys(src)) if (!(k in PU_WEIGHTS)) problems.push(`неизвестный бонус "${k}" пропущен`);
+  for (const k of Object.keys(PU_WEIGHTS)) {
+    const v = src[k];
+    if (v === undefined) { weights[k] = 0; problems.push(`бонус "${k}" не указан — не будет выпадать`); continue; }
+    if (typeof v !== 'number' || !isFinite(v) || v < 0) { weights[k] = 0; problems.push(`у бонуса "${k}" неверное значение ${JSON.stringify(v)} — считается 0`); continue; }
+    weights[k] = v;
+  }
+  const total = Object.values(weights).reduce((s, v) => s + v, 0);
+  if (total <= 0) return { weights: null, problems: problems.concat('сумма весов равна 0 — используются значения по умолчанию') };
+  if (Math.abs(total - 100) > 1e-6) problems.push(`сумма процентов ${total}, а не 100 — значения пересчитаны пропорционально`);
+  return { weights, problems };
+}
 const EXTRA_LIFE_SCORE = 20000;                          // разовая дополнительная жизнь, как в оригинале
 const PARTNER_FREEZE = 3;                                // сколько секунд стоит танк, подбитый напарником
 const DONE_TIME = 8, TALLY_DELAY = 1.5;                  // длительность фазы «уровень пройден» и пауза до табло
@@ -46,6 +65,8 @@ const gi = (c, r) => r * N + c;
 function createGame(opts = {}) {
   const emit = opts.emit || function () {};
   const track = !!opts.trackChanges;
+  // opts.powerupWeights — свои веса (например, проценты) выпадения бонусов; по умолчанию PU_WEIGHTS
+  const puWeights = sanitizeWeights(opts.powerupWeights).weights || PU_WEIGHTS;
   const G = {
     state: 'intro', stateT: 0, level: 1, twoP: false, paused: false,
     players: [], enemies: [], bullets: [], powerups: [], stars: [], queue: [],
@@ -433,9 +454,9 @@ function createGame(opts = {}) {
       y = Math.floor(Math.random() * 22) * 24;
       tries++;
     } while (tries < 30 && rectsOverlap(x, y, TS, TS, 216, 528, 192, 96));
-    const types = Object.keys(PU_WEIGHTS), total = types.reduce((s, k) => s + PU_WEIGHTS[k], 0);
-    let r = Math.random() * total, type = types[0];
-    for (const k of types) { r -= PU_WEIGHTS[k]; if (r < 0) { type = k; break; } }
+    const types = Object.keys(puWeights), total = types.reduce((s, k) => s + puWeights[k], 0);
+    let r = Math.random() * total, type = types.find(k => puWeights[k] > 0);
+    for (const k of types) { r -= puWeights[k]; if (r < 0) { type = k; break; } }
     G.powerups = [{ type, x, y, t: 18 }];
     sfx('bonusAppear');
   }
@@ -656,7 +677,8 @@ function createGame(opts = {}) {
 }
 
 const api = { createGame, CELL, N, FS, TS, EMPTY, BRICK, STEEL, WATER, BUSH, ICE, BASE, DX, DY, BASE_X, BASE_Y, STUN_TIME,
-              CLASSIC_STAGES: STAGES.length, ETYPES, DONE_TIME, TALLY_DELAY, TALLY_BONUS, PARTNER_FREEZE };
+              CLASSIC_STAGES: STAGES.length, ETYPES, DONE_TIME, TALLY_DELAY, TALLY_BONUS, PARTNER_FREEZE,
+              PU_WEIGHTS, sanitizeWeights };
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 else root.Tanks = api;
 })(typeof self !== 'undefined' ? self : this);
